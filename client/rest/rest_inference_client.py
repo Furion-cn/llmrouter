@@ -7,7 +7,7 @@ import time
 from typing import List, Dict, Any, Optional
 
 # 添加项目根目录到Python路径
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from lib.rest_client.async_client import AsyncHttpClient
 from lib.rest_client.report_generator import RequestReportGenerator
@@ -481,13 +481,13 @@ class RESTInferenceClient:
             )
             print(f"读取到 {len(request_bodies)} 条请求体")
             
-            # 使用传统的并发请求方法
-            await self.test_concurrent_requests(
+            # 使用已有的并发请求方法
+            await self.inference_concurrent_requests(
                 request_bodies=request_bodies,
                 headers=headers,
                 rate_limit=rate_limit
             )
-            return  # 提前返回，因为test_concurrent_requests已经处理了结果保存
+            return  # 提前返回，因为inference_concurrent_requests已经处理了结果保存
         
         print(f"✓ 所有响应已通过异步写入器保存，共完成 {len(results)} 个请求")
 
