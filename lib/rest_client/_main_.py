@@ -7,19 +7,6 @@ from prometheus_client import generate_latest
 from async_client import AsyncHttpClient,REGISTRY
 from concurrent.futures import ThreadPoolExecutor
 from llmrouter.lib.metrics.Labels import Metrics
-'''from llmrouter.lib.metrics.Labels.Metrics import (
-    REQUESTS_TOTAL,
-    SUCCESS_REQUESTS,
-    ERROR_LOGS_TOTAL,
-    CONCURRENT_THREADS,
-    Histogram,
-    FILE_DOWNLOADS_TOTAL,
-    build_labels,
-    build_download_labels,
-    record_usage_metrics,
-    update_rate_limit_metric,
-)'''
-
 
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
