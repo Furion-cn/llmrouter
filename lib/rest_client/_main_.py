@@ -4,16 +4,16 @@ import logging
 import requests
 from prometheus_client import generate_latest
 
-from async_client import AsyncHttpClient,REGISTRY
+from lib.rest_client.async_client import AsyncHttpClient,REGISTRY
 from concurrent.futures import ThreadPoolExecutor
-from llmrouter.lib.metrics.Labels import Metrics
+from lib.metrics.Labels import Metrics
 
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 API_URL = "https://www.furion-tech.com/v1/chat/completions"
-API_KEY = "sk-Pv2GpTLrf8ELB4RXdNpD6DV3TmmiqqovosFhnJmPzsCU9zio"
+API_KEY = "sk-ogXs2Zq1cZiWUGNtQMIq8hfLgqSNnQXWMuAZZdSFoL9azGVc"
 
 CONTROLLER_URL = "https://dev-tunnel-api.furion-tech.com/prometheus/api/v1/import/prometheus"
 
@@ -77,7 +77,7 @@ async def run_multiple_requests(num_requests: int, max_concurrency: int):
                     }
 
                     try:
-                        # 移除 timeout 参数,因为 post 方法不支持
+
                         result = await client.post(API_URL, data, headers=headers)
 
                         # 看一下返回
@@ -114,8 +114,8 @@ async def run_multiple_requests(num_requests: int, max_concurrency: int):
 
 # 运行多个请求
 async def main():
-    num_requests = 10000  # 先测试少量请求
-    max_concurrency = 50  # 先测试较小的并发
+    num_requests = 10  # 先测试少量请求
+    max_concurrency = 5  # 先测试较小的并发
     logger.info(f"Starting {num_requests} requests with max concurrency {max_concurrency}")
     await run_multiple_requests(num_requests, max_concurrency)
     logger.info("All requests completed")

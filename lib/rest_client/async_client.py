@@ -19,10 +19,10 @@ class LogMode(Enum):
     ERROR = "error"       # 错误模式：只打印错误信息
 
 ###指标相关：从 metrics.py 导入
-from llmrouter.lib.metrics.Labels import (
+from lib.metrics.Labels import (
     REGISTRY
 )
-from llmrouter.lib.metrics.Labels import Metrics
+from lib.metrics.Labels import Metrics
 
 class AsyncHttpClient:
     def __init__(self, rate_limit: int = 10, log_mode: str = "partial",max_concurrency:int=1500):
@@ -211,10 +211,11 @@ class AsyncHttpClient:
         request_id = self._generate_request_id()
         # 添加requestid到headers
         final_headers = self._add_request_id_to_headers(headers, request_id)
-
+        concurrency_labels = Metrics.build_labels('GET','pending', url)
         ### 指标：并发线程+1
-        concurrency_labels = Metrics.build_labels('GET', 'pending', url)
-        Metrics.CONCURRENT_THREADS.labels(**concurrency_labels).inc()
+        # 任务开始前 +1
+        labels = Metrics.build_concurrency(method='WORKER',status='RUNNING',url='internal')
+        Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).inc()
         
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -232,10 +233,8 @@ class AsyncHttpClient:
                     labels = Metrics.build_labels('GET', response.status, url)
                     Metrics.REQUESTS_TOTAL.labels(**labels).inc()
 
-                    if 200 <= response.status < 300:
-                        Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
-                    else:
-                        Metrics.ERROR_LOGS_TOTAL.labels(**labels).inc()
+                    Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
+
 
                     ### 指标：tokens & ratelimit
                     usage = response_data.get('usage') if isinstance(response_data, dict) else None
@@ -268,7 +267,7 @@ class AsyncHttpClient:
             duration = time.time() - start
             Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
             ### 指标：并发线程 -1
-            Metrics.CONCURRENT_THREADS.labels(**concurrency_labels).dec()
+            Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).dec()
     
     async def post(self, url: str, data: Dict = None, headers: Dict = None) -> Dict[str, Any]:
 
@@ -283,9 +282,11 @@ class AsyncHttpClient:
         # 记录开始时间
         start_time = time.time()
 
-        ###指标：并发进程+1
-        concurrency_labels = Metrics.build_labels('POST','pending',url)
-        Metrics.CONCURRENT_THREADS.labels(**concurrency_labels).inc()
+        concurrency_labels = Metrics.build_labels('GET','pending', url)
+        ### 指标：并发线程+1
+        # 任务开始前 +1
+        labels = Metrics.build_concurrency(method='WORKER',status='RUNNING',url='internal')
+        Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).inc()
         
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -306,10 +307,8 @@ class AsyncHttpClient:
                     ### 指标：请求计数
                     labels = Metrics.build_labels('POST', response.status, url)
                     Metrics.REQUESTS_TOTAL.labels(**labels).inc()
-                    if 200 <= response.status < 300:
-                        Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
-                    else:
-                        Metrics.ERROR_LOGS_TOTAL.labels(**labels).inc()
+                    Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
+
 
                     ### 指标：tokens & ratelimit
                     usage = response_data.get('usage') if isinstance(response_data, dict) else None
@@ -345,7 +344,7 @@ class AsyncHttpClient:
             duration = time.time() - start
             Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
             ### 指标：并发线程 -1
-            Metrics.CONCURRENT_THREADS.labels(**concurrency_labels).dec()
+            Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).dec()
 
     
     async def download_file(self, url: str, filepath: str, headers: Dict = None) -> bool:
@@ -354,10 +353,12 @@ class AsyncHttpClient:
         request_id = self._generate_request_id()
         # 添加requestid到headers
         final_headers = self._add_request_id_to_headers(headers, request_id)
-        
-        ### 并发进程 +1
+
         concurrency_labels = Metrics.build_labels('GET','pending', url)
-        Metrics.CONCURRENT_THREADS.labels(**concurrency_labels).inc()
+        ### 指标：并发线程+1
+        # 任务开始前 +1
+        labels = Metrics.build_concurrency(method='WORKER',status='RUNNING',url='internal')
+        Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).inc()
 
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -374,10 +375,8 @@ class AsyncHttpClient:
                         ### 指标：请求计数
                         labels = Metrics.build_labels('GET', response.status, url)
                         Metrics.REQUESTS_TOTAL.labels(**labels).inc()
-                        if 200 <= response.status < 300:
-                            Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
-                        else:
-                            Metrics.ERROR_LOGS_TOTAL.labels(**labels).inc()
+                        Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
+
 
                         Metrics.update_rate_limit_metric(response_headers, labels)
 
@@ -420,8 +419,8 @@ class AsyncHttpClient:
         finally:
             duration = time.time() - start
             Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
-            ### 并发线程 -1
-            Metrics.CONCURRENT_THREADS.labels(**concurrency_labels).dec()
+            ### 指标：并发线程 -1
+            Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).dec()
     
     async def save_response_to_file(self, response: Dict, filepath: str):
         """保存响应到文件"""

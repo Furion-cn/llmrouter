@@ -91,6 +91,12 @@ class Metrics:
         COMMON_LABEL_NAMES,
         registry=REGISTRY
     )
+    TOTAL_WORKER_COROUTINES = Gauge(
+        'total_worker_coroutines',
+        'Current number of active worker coroutines (Business logic level)',
+        COMMON_LABEL_NAMES,
+        registry=REGISTRY
+    )
 
     # --- 文件下载 ---
     FILE_DOWNLOADS_TOTAL = Counter(
@@ -113,12 +119,31 @@ class Metrics:
     # =========================
 
     @classmethod
+    def build_concurrency(cls,method: str, status: Any, url: str) -> Dict[str, str]:
+        worker_labels = cls.COMMON_LABELS.copy()
+
+        worker_labels['method'] = 'WORKER'      # 这是一个 Worker，不是 HTTP 方法
+        worker_labels['status'] = 'RUNNING'     # 正在运行中
+        worker_labels['url'] = 'internal'
+
+        worker_labels.update({
+            'method': 'WORKER',
+            'status': 'RUNNING',
+            'url': 'internal',
+        })
+
+        return worker_labels
+
+
+
+    @classmethod
     def build_labels(cls, method: str, status: Any, url: str) -> Dict[str, str]:
         """
         构造统一的标签字典
         """
         # 基于默认字典进行合并，覆盖动态字段
         labels = cls.COMMON_LABELS.copy()
+
         labels.update({
             'method': method.upper(),
             'status': str(status),
@@ -162,7 +187,7 @@ class Metrics:
     @classmethod
     def update_rate_limit_metric(cls, headers: Dict[str, str], labels: Dict[str, str]) -> None:
         """
-        从响应头里读取剩余配额
+        从响应头里读取剩余配额，比如说1分钟允许打n个请求，这个函数查看目前还允许打几个请求
         """
         if not headers:
             return
