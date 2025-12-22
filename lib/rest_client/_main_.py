@@ -1,58 +1,59 @@
+import sys
+import os
+
+# --- 核心修复代码开始 ---
+# 获取当前脚本文件的绝对路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 向上回退 3 层，找到 'llmrouter' 文件夹所在的父目录
+# 路径推演: rest_client -> lib -> llmrouter -> (父目录 /home/zeng_rongxi)
+project_root = os.path.abspath(os.path.join(current_dir, "../../../"))
+# 将这个路径加入 Python 搜索路径
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import asyncio
-import aiohttp
 import logging
-import requests
 from prometheus_client import generate_latest
 
-from lib.rest_client.async_client import AsyncHttpClient,REGISTRY
+from llmrouter.lib.rest_client.async_client import AsyncHttpClient,REGISTRY
 from concurrent.futures import ThreadPoolExecutor
-from lib.metrics.Labels import Metrics
+from llmrouter.lib.metrics.Labels import Metrics
 
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-API_URL = "https://www.furion-tech.com/v1/chat/completions"
-API_KEY = "sk-ogXs2Zq1cZiWUGNtQMIq8hfLgqSNnQXWMuAZZdSFoL9azGVc"
+import os
+# 1. 导入加载器
+from dotenv import load_dotenv
 
-CONTROLLER_URL = "https://dev-tunnel-api.furion-tech.com/prometheus/api/v1/import/prometheus"
+# 2. 加载 .env 文件里的内容到环境变量中
+load_dotenv()
 
-def sync_push_to_controller():
-    try:
-        metrics_text = generate_latest(REGISTRY)
-        headers = {
-            'Content-Type': 'text/plain',
-            'TenantID': '0'
-        }
-        resp = requests.post(CONTROLLER_URL, headers=headers, data=metrics_text, timeout=10)
-        if resp.status_code == 204:
-            logger.info("Metrics pushed to Controller successfully")
-        else:
-            logger.warning("Push to Controller failed: %s", resp.status_code)
-    except Exception as e:
-        logger.error("Push to Controller failed: %s", e)
+# 3. 读取变量 (如果没读取到，可以用第二个参数设置默认值或报错)
+API_URL = os.getenv("FURION_API_URL")
+API_KEY = os.getenv("FURION_API_KEY")
 
-
-async def push_metrics(executor: ThreadPoolExecutor):
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(executor, sync_push_to_controller)
-
-
-async def periodic_push(executor: ThreadPoolExecutor, stop_event: asyncio.Event):
-    while not stop_event.is_set():
-        await push_metrics(executor)
-        await asyncio.sleep(10)
-
+# 4. 安全检查 (可选，建议加上)
+if not API_KEY:
+    raise ValueError("❌ 未找到 API Key，请检查 .env 文件！")
 
 async def run_multiple_requests(num_requests: int, max_concurrency: int):
     executor = ThreadPoolExecutor(max_workers=max(1, max_concurrency // 10))
 
     # 并发线程指标
-    thread_labels = {"method": "GLOBAL", "status": "OK", **Metrics.COMMON_LABELS}
+    # 1. 先复制默认值
+    thread_labels = Metrics.COMMON_LABELS.copy()
+    # 2. 再更新特定的值
+    thread_labels.update({
+        "method": "GLOBAL", 
+        "status": "OK",
+        "url":API_URL
+    })
     Metrics.CONCURRENT_THREADS.labels(**thread_labels).set(max_concurrency)
 
     stop_event = asyncio.Event()
-    periodic_task = asyncio.create_task(periodic_push(executor, stop_event))
+    periodic_task = asyncio.create_task(Metrics.periodic_push(executor, stop_event))
 
     try:
         async with AsyncHttpClient(rate_limit=100, log_mode="simple", max_concurrency=1500) as client:
@@ -61,33 +62,37 @@ async def run_multiple_requests(num_requests: int, max_concurrency: int):
 
             async def limited_call():
                 async with semaphore:
-                    headers = {
-                        "Authorization": f"Bearer {API_KEY}",
-                        "Content-Type": "application/json",
-                        "X-Test-Traffic": "true",
-                        "MOCK_RESPONSE_DELAY": "5"
-                    }
-
-                    data = {
-                        "model": "gemini-2.5-pro",
-                        "messages": [
-                            {"role": "user", "content": "你好,请简单介绍一下自己"}
-                        ],
-                        "max_tokens": 100
-                    }
-
+                    # --- [修改点 1] 计数器 +1 ---
+                    # 建议将 url 改为 'task_wrapper' 或保持 'internal' (如果 AsyncHttpClient 里没有重复打点的话)
+                    worker_labels = Metrics.build_concurrency()
+                    Metrics.TOTAL_WORKER_COROUTINES.labels(**worker_labels).inc()
+                    
                     try:
+                        # --- 原有的业务逻辑 ---
+                        headers = {
+                            "Authorization": f"Bearer {API_KEY}",
+                            "Content-Type": "application/json",
+                            "X-Test-Traffic": "true",
+                            "MOCK_RESPONSE_DELAY": "5"
+                        }
 
-                        result = await client.post(API_URL, data, headers=headers)
+                        data = {
+                            "model": "gemini-2.5-pro",
+                            "messages": [
+                                {"role": "user", "content": "你好,请简单介绍一下自己"}
+                            ],
+                            "max_tokens": 100
+                        }
 
-                        # 看一下返回
-                        logger.info(f"Status: {result['status']}, RequestID: {result['request_id']}")
-
-                        # 可选:保存响应到文件
-                        # await client.save_response_to_file(result, f"response_{result['request_id']}.json")
-
-                    except Exception as e:
-                        logger.error(f"Request failed: {e}", exc_info=True)
+                        try:
+                            result = await client.post(API_URL, data, headers=headers)
+                            logger.info(f"Status: {result['status']}, RequestID: {result['request_id']}")
+                        except Exception as e:
+                            logger.error(f"Request failed: {e}", exc_info=True)
+                            
+                    finally:
+                        # --- [修改点 2] 计数器 -1 (无论成功失败都会执行) ---
+                        Metrics.TOTAL_WORKER_COROUTINES.labels(**worker_labels).dec()
 
             # 创建任务列表
             tasks = [limited_call() for _ in range(num_requests)]
@@ -108,14 +113,14 @@ async def run_multiple_requests(num_requests: int, max_concurrency: int):
         await periodic_task
 
         # 最后再推送一次指标
-        await push_metrics(executor)
+        await Metrics.push_metrics(executor)
         executor.shutdown(wait=True)
 
 
 # 运行多个请求
 async def main():
-    num_requests = 10  # 先测试少量请求
-    max_concurrency = 5  # 先测试较小的并发
+    num_requests = 100000  # 先测试少量请求
+    max_concurrency = 500  # 先测试较小的并发
     logger.info(f"Starting {num_requests} requests with max concurrency {max_concurrency}")
     await run_multiple_requests(num_requests, max_concurrency)
     logger.info("All requests completed")

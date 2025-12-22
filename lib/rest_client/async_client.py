@@ -1,6 +1,4 @@
-import asyncio
 import time
-
 import aiohttp
 import aiofiles
 from asyncio_throttle import Throttler
@@ -19,10 +17,10 @@ class LogMode(Enum):
     ERROR = "error"       # 错误模式：只打印错误信息
 
 ###指标相关：从 metrics.py 导入
-from lib.metrics.Labels import (
+from llmrouter.lib.metrics.Labels import (
     REGISTRY
 )
-from lib.metrics.Labels import Metrics
+from llmrouter.lib.metrics.Labels import Metrics
 
 class AsyncHttpClient:
     def __init__(self, rate_limit: int = 10, log_mode: str = "partial",max_concurrency:int=1500):
@@ -158,6 +156,9 @@ class AsyncHttpClient:
             return f" | Usage: {usage.get('prompt_tokens', 0)}/{usage.get('completion_tokens', 0)}/{usage.get('total_tokens', 0)}"
         return ""
     
+
+    
+
     def _truncate_dict_values(self, data: Dict, max_length: int = 200) -> Dict:
         """
         截断字典中大于指定长度的值
@@ -212,10 +213,6 @@ class AsyncHttpClient:
         # 添加requestid到headers
         final_headers = self._add_request_id_to_headers(headers, request_id)
         concurrency_labels = Metrics.build_labels('GET','pending', url)
-        ### 指标：并发线程+1
-        # 任务开始前 +1
-        labels = Metrics.build_concurrency(method='WORKER',status='RUNNING',url='internal')
-        Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).inc()
         
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -266,12 +263,8 @@ class AsyncHttpClient:
         finally:
             duration = time.time() - start
             Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
-            ### 指标：并发线程 -1
-            Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).dec()
     
     async def post(self, url: str, data: Dict = None, headers: Dict = None) -> Dict[str, Any]:
-
-
 
         """异步POST请求"""
         import time
@@ -283,10 +276,6 @@ class AsyncHttpClient:
         start_time = time.time()
 
         concurrency_labels = Metrics.build_labels('GET','pending', url)
-        ### 指标：并发线程+1
-        # 任务开始前 +1
-        labels = Metrics.build_concurrency(method='WORKER',status='RUNNING',url='internal')
-        Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).inc()
         
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -343,8 +332,6 @@ class AsyncHttpClient:
         finally:
             duration = time.time() - start
             Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
-            ### 指标：并发线程 -1
-            Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).dec()
 
     
     async def download_file(self, url: str, filepath: str, headers: Dict = None) -> bool:
@@ -355,10 +342,6 @@ class AsyncHttpClient:
         final_headers = self._add_request_id_to_headers(headers, request_id)
 
         concurrency_labels = Metrics.build_labels('GET','pending', url)
-        ### 指标：并发线程+1
-        # 任务开始前 +1
-        labels = Metrics.build_concurrency(method='WORKER',status='RUNNING',url='internal')
-        Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).inc()
 
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -419,8 +402,7 @@ class AsyncHttpClient:
         finally:
             duration = time.time() - start
             Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
-            ### 指标：并发线程 -1
-            Metrics.TOTAL_WORKER_COROUTINES.labels(**labels).dec()
+
     
     async def save_response_to_file(self, response: Dict, filepath: str):
         """保存响应到文件"""
