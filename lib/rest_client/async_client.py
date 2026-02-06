@@ -1,4 +1,4 @@
-import asyncio
+import time
 import aiohttp
 import aiofiles
 from asyncio_throttle import Throttler
@@ -16,8 +16,14 @@ class LogMode(Enum):
     FULL = "full"         # 全打印模式：完全打印header和body
     ERROR = "error"       # 错误模式：只打印错误信息
 
+###指标相关：从 metrics.py 导入
+from llmrouter.lib.metrics.Labels import (
+    REGISTRY
+)
+from llmrouter.lib.metrics.Labels import Metrics
+
 class AsyncHttpClient:
-    def __init__(self, rate_limit: int = 10, log_mode: str = "partial"):
+    def __init__(self, rate_limit: int = 10, log_mode: str = "partial",max_concurrency:int=1500):
         """
         初始化异步HTTP客户端
         :param rate_limit: 每秒最大请求数
@@ -26,7 +32,8 @@ class AsyncHttpClient:
         self.throttler = Throttler(rate_limit=rate_limit)
         self.session = None
         self.log_mode = LogMode(log_mode) if isinstance(log_mode, str) else log_mode
-        
+        self.max_concurrency=max_concurrency
+
         # 打印初始化参数
         print(f"AsyncHttpClient 初始化: rate_limit={rate_limit}, log_mode={log_mode}")
     
@@ -149,6 +156,9 @@ class AsyncHttpClient:
             return f" | Usage: {usage.get('prompt_tokens', 0)}/{usage.get('completion_tokens', 0)}/{usage.get('total_tokens', 0)}"
         return ""
     
+
+    
+
     def _truncate_dict_values(self, data: Dict, max_length: int = 200) -> Dict:
         """
         截断字典中大于指定长度的值
@@ -187,7 +197,8 @@ class AsyncHttpClient:
         return new_headers
     
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        connector = aiohttp.TCPConnector(limit = self.max_concurrency*2, limit_per_host = self.max_concurrency)
+        self.session = aiohttp.ClientSession(connector = connector)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -195,10 +206,13 @@ class AsyncHttpClient:
             await self.session.close()
     
     async def get(self, url: str, params: Dict = None, headers: Dict = None) -> Dict[str, Any]:
+        start = time.time()
+
         """异步GET请求"""
         request_id = self._generate_request_id()
         # 添加requestid到headers
         final_headers = self._add_request_id_to_headers(headers, request_id)
+        concurrency_labels = Metrics.build_labels('GET','pending', url)
         
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -206,36 +220,62 @@ class AsyncHttpClient:
             self._print_headers_with_request_id(request_id, "请求头部", final_headers)
             if params:
                 self._print_body_with_request_id(request_id, "请求参数", params)
-        
-        async with self.throttler:
-            async with self.session.get(url, params=params, headers=final_headers) as response:
-                response_data = await response.json()
-                response_headers = dict(response.headers)
-                
-                # 打印响应信息
-                if self.log_mode == LogMode.SIMPLE:
-                    self._print_simple_summary_with_request_id(request_id, response.status, response_data, response_headers)
-                elif self.log_mode != LogMode.ERROR:
-                    self._print_with_request_id(request_id, f"响应状态码: {response.status}")
-                    self._print_headers_with_request_id(request_id, "响应头部", response_headers)
-                    self._print_body_with_request_id(request_id, "响应体", response_data)
-                
-                return {
-                    'status': response.status,
-                    'data': response_data,
-                    'headers': response_headers,
-                    'request_id': request_id
-                }
+        try:
+            async with self.throttler:
+                async with self.session.get(url, params=params, headers=final_headers) as response:
+                    response_data = await response.json()
+                    response_headers = dict(response.headers)
+                    
+                    ### 指标：请求计数
+                    labels = Metrics.build_labels('GET', response.status, url)
+                    Metrics.REQUESTS_TOTAL.labels(**labels).inc()
+
+                    Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
+
+
+                    ### 指标：tokens & ratelimit
+                    usage = response_data.get('usage') if isinstance(response_data, dict) else None
+                    Metrics.record_usage_metrics(usage, labels)
+                    Metrics.update_rate_limit_metric(response_headers, labels)
+
+                    # 打印响应信息
+                    if self.log_mode == LogMode.SIMPLE:
+                        self._print_simple_summary_with_request_id(request_id, response.status, response_data, response_headers)
+                    elif self.log_mode != LogMode.ERROR:
+                        self._print_with_request_id(request_id, f"响应状态码: {response.status}")
+                        self._print_headers_with_request_id(request_id, "响应头部", response_headers)
+                        self._print_body_with_request_id(request_id, "响应体", response_data)
+                    
+                    return {
+                        'status': response.status,
+                        'data': response_data,
+                        'headers': response_headers,
+                        'request_id': request_id
+                    }
+        except Exception as e:
+
+            ### 指标：异常计数
+            err_labels = Metrics.build_labels('GET','exception',url)
+            Metrics.ERROR_LOGS_TOTAL.labels(**err_labels).inc()
+            if self.log_mode != LogMode.NONE:
+                self._print_with_request_id(request_id, f"GET请求异常:{ e}")
+            raise
+        finally:
+            duration = time.time() - start
+            Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
     
     async def post(self, url: str, data: Dict = None, headers: Dict = None) -> Dict[str, Any]:
+
         """异步POST请求"""
         import time
         request_id = self._generate_request_id()
         # 添加requestid到headers
         final_headers = self._add_request_id_to_headers(headers, request_id)
-        
+        start = time.time()
         # 记录开始时间
         start_time = time.time()
+
+        concurrency_labels = Metrics.build_labels('GET','pending', url)
         
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
@@ -243,66 +283,126 @@ class AsyncHttpClient:
             self._print_headers_with_request_id(request_id, "请求头部", final_headers)
             self._print_body_with_request_id(request_id, "请求体", data)
         
-        async with self.throttler:
-            async with self.session.post(url, json=data, headers=final_headers) as response:
-                response_data = await response.json()
-                response_headers = dict(response.headers)
-                
-                # 计算耗时
-                end_time = time.time()
-                duration = (end_time - start_time) * 1000  # 转换为毫秒
-                
-                # 打印响应信息
-                if self.log_mode == LogMode.SIMPLE:
-                    self._print_simple_summary_with_request_id(request_id, response.status, response_data, response_headers)
-                elif self.log_mode != LogMode.ERROR:
-                    self._print_with_request_id(request_id, f"响应状态码: {response.status} (耗时: {duration:.2f}ms)")
-                    self._print_headers_with_request_id(request_id, "响应头部", response_headers)
-                    self._print_body_with_request_id(request_id, "响应体", response_data)
-                
-                return {
-                    'status': response.status,
-                    'data': response_data,
-                    'headers': response_headers,
-                    'request_id': request_id,
-                    'duration_ms': duration
-                }
+        try:
+            async with self.throttler:
+                async with self.session.post(url, json=data, headers=final_headers) as response:
+
+                    response_data = await response.json()
+                    response_headers = dict(response.headers)
+
+                    end_time = time.time()
+                    duration = (end_time - start_time) * 1000  # ms
+
+                    ### 指标：请求计数
+                    labels = Metrics.build_labels('POST', response.status, url)
+                    Metrics.REQUESTS_TOTAL.labels(**labels).inc()
+                    Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
+
+
+                    ### 指标：tokens & ratelimit
+                    usage = response_data.get('usage') if isinstance(response_data, dict) else None
+                    Metrics.record_usage_metrics(usage, labels)
+                    Metrics.update_rate_limit_metric(response_headers, labels)
+
+                    # 打印响应信息
+                    if self.log_mode == LogMode.SIMPLE:
+                        self._print_simple_summary_with_request_id(request_id, response.status, response_data,
+                                                                   response_headers)
+                    elif self.log_mode != LogMode.ERROR:
+                        self._print_with_request_id(request_id,
+                                                    f"响应状态码: {response.status} (耗时: {duration:.2f}ms)")
+                        self._print_headers_with_request_id(request_id, "响应头部", response_headers)
+                        self._print_body_with_request_id(request_id, "响应体", response_data)
+
+                    return {
+                        'status': response.status,
+                        'data': response_data,
+                        'headers': response_headers,
+                        'request_id': request_id,
+                        'duration_ms': duration
+                    }
+        except Exception as e:
+
+            ### 指标：异常计数
+            err_labels = Metrics.build_labels('POST', 'exception', url)
+            Metrics.ERROR_LOGS_TOTAL.labels(**err_labels).inc()
+            if self.log_mode != LogMode.NONE:
+                self._print_with_request_id(request_id, f"POST请求异常: {e}")
+            raise
+        finally:
+            duration = time.time() - start
+            Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
+
     
     async def download_file(self, url: str, filepath: str, headers: Dict = None) -> bool:
+        start = time.time()
         """异步下载文件"""
         request_id = self._generate_request_id()
         # 添加requestid到headers
         final_headers = self._add_request_id_to_headers(headers, request_id)
-        
+
+        concurrency_labels = Metrics.build_labels('GET','pending', url)
+
         # 打印请求信息
         if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
             self._print_with_request_id(request_id, f"文件下载请求: {url}")
             self._print_with_request_id(request_id, f"保存路径: {filepath}")
             self._print_headers_with_request_id(request_id, "请求头部", final_headers)
         
-        async with self.throttler:
-            try:
-                async with self.session.get(url, headers=final_headers) as response:
-                    if self.log_mode == LogMode.SIMPLE:
-                        self._print_with_request_id(request_id, f"文件下载: HTTP {response.status} -> {filepath}")
-                    elif self.log_mode != LogMode.ERROR:
-                        self._print_with_request_id(request_id, f"响应状态码: {response.status}")
-                        self._print_headers_with_request_id(request_id, "响应头部", dict(response.headers))
-                    
-                    if response.status == 200:
-                        async with aiofiles.open(filepath, 'wb') as f:
-                            await f.write(await response.read())
-                        if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
-                            self._print_with_request_id(request_id, f"文件下载成功: {filepath}")
-                        return True
-                    else:
-                        if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
-                            self._print_with_request_id(request_id, f"文件下载失败: HTTP {response.status}")
-                        return False
-            except Exception as e:
-                if self.log_mode != LogMode.ERROR:
-                    self._print_with_request_id(request_id, f"下载失败: {e}")
-                return False
+        try:
+            async with self.throttler:
+                try:
+                    async with self.session.get(url, headers=final_headers) as response:
+                        response_headers = dict(response.headers)
+
+                        ### 指标：请求计数
+                        labels = Metrics.build_labels('GET', response.status, url)
+                        Metrics.REQUESTS_TOTAL.labels(**labels).inc()
+                        Metrics.SUCCESS_REQUESTS.labels(**labels).inc()
+
+
+                        Metrics.update_rate_limit_metric(response_headers, labels)
+
+                        if self.log_mode == LogMode.SIMPLE:
+                            self._print_with_request_id(request_id, f"文件下载: HTTP {response.status} -> {filepath}")
+                        elif self.log_mode != LogMode.ERROR:
+                            self._print_with_request_id(request_id, f"响应状态码: {response.status}")
+                            self._print_headers_with_request_id(request_id, "响应头部", response_headers)
+
+                        if response.status == 200:
+                            async with aiofiles.open(filepath, 'wb') as f:
+                                await f.write(await response.read())
+
+                            ### 指标：文件下载成功
+                            dl_labels = Metrics.build_download_labels('GET', response.status, url, 'success')
+                            Metrics.FILE_DOWNLOADS_TOTAL.labels(**dl_labels).inc()
+
+                            if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
+                                self._print_with_request_id(request_id, f"文件下载成功: {filepath}")
+                            return True
+                        else:
+                            ### 指标：文件下载失败（非200）
+                            dl_labels = Metrics.build_download_labels('GET', response.status, url, 'http_error')
+                            Metrics.FILE_DOWNLOADS_TOTAL.labels(**dl_labels).inc()
+
+                            if self.log_mode not in [LogMode.SIMPLE, LogMode.ERROR]:
+                                self._print_with_request_id(request_id, f"文件下载失败: HTTP {response.status}")
+                            return False
+                except Exception as e:
+                    ### 指标：下载过程中异常
+                    err_labels = Metrics.build_labels('GET', 'exception', url)
+                    Metrics.ERROR_LOGS_TOTAL.labels(**err_labels).inc()
+                    dl_labels = Metrics.build_download_labels('GET', 'exception', url, 'exception')
+                    Metrics.FILE_DOWNLOADS_TOTAL.labels(**dl_labels).inc()
+
+
+                    if self.log_mode != LogMode.ERROR:
+                        self._print_with_request_id(request_id, f"下载失败: {e}")
+                    return False
+        finally:
+            duration = time.time() - start
+            Metrics.REQUEST_DURATION.labels(**concurrency_labels).observe(duration)
+
     
     async def save_response_to_file(self, response: Dict, filepath: str):
         """保存响应到文件"""
